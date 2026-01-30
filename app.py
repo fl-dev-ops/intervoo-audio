@@ -129,6 +129,41 @@ st.sidebar.markdown(f"**Filtered Records:** {len(filtered_df)}")
 # Main content
 st.markdown("---")
 
+# Stats cards
+# Duration values are mixed: some in seconds (small values), some in milliseconds (large values)
+# Normalize all to seconds: if value > 1000, assume milliseconds and convert to seconds
+durations = filtered_df["duration"].fillna(0)
+normalized_seconds = durations.apply(lambda x: x / 1000 if x > 1000 else x)
+total_duration_seconds = normalized_seconds.sum()
+total_hours = total_duration_seconds / 3600  # Convert seconds to hours
+total_recordings = len(filtered_df)
+unique_students = filtered_df["student_name"].nunique()
+
+col1, col2, col3 = st.columns(3)
+
+with col1:
+    st.metric(
+        label="Total Session Time",
+        value=f"{total_hours:.1f} hrs",
+        help="Total duration of all filtered recordings",
+    )
+
+with col2:
+    st.metric(
+        label="Downloadable Audio",
+        value=f"{total_recordings:,}",
+        help="Number of audio files available for download",
+    )
+
+with col3:
+    st.metric(
+        label="Students",
+        value=f"{unique_students:,}",
+        help="Number of unique students in filtered results",
+    )
+
+st.markdown("---")
+
 # Display filtered data
 if filtered_df.empty:
     st.warning("No recordings match the selected filters.")
