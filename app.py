@@ -271,7 +271,7 @@ if st.session_state.calculate_durations:
         filtered_df = filtered_df.copy()
         filtered_df["duration_seconds"] = durations_sec
         filtered_df["duration_formatted"] = filtered_df["duration_seconds"].apply(
-            lambda x: f"{int(x // 60)}:{int(x % 60):02d}" if x > 0 else "—"
+            lambda x: f"{int(x // 60)}m {int(x % 60):02d}s" if x > 0 else "—"
         )
         total_duration_seconds = sum(durations_sec)
         total_hours = total_duration_seconds / 3600
