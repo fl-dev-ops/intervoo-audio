@@ -285,6 +285,9 @@ if filter_key in st.session_state.duration_cache:
     )
     durations_calculated = True
 
+# Placeholder for calculate button (will be populated after table loads)
+calculate_button_placeholder = st.empty()
+
 col1, col2, col3 = st.columns(3)
 
 with col1:
@@ -298,38 +301,8 @@ with col1:
         st.metric(
             label="Total Session Time",
             value="— hrs",
-            help="Click 'Calculate' to get accurate times",
+            help="Calculating...",
         )
-        if st.button("📊 Calculate", key="calc_btn"):
-            # Calculate durations and cache
-            urls = filtered_df["audio_url"].tolist()
-            progress_bar = st.progress(0, text="Calculating durations...")
-
-            # Process in batches to update progress
-            batch_size = 50
-            all_durations = []
-            for i in range(0, len(urls), batch_size):
-                batch = urls[i : i + batch_size]
-                batch_durations = get_durations_parallel(batch, max_workers=20)
-                all_durations.extend(batch_durations)
-                progress = min((i + batch_size) / len(urls), 1.0)
-                progress_bar.progress(
-                    progress,
-                    text=f"Processing {min(i + batch_size, len(urls))}/{len(urls)} files...",
-                )
-
-            progress_bar.empty()
-
-            # Store in session state cache
-            url_to_duration = dict(zip(urls, all_durations))
-            total_duration_seconds = sum(all_durations)
-            total_hours = total_duration_seconds / 3600
-
-            st.session_state.duration_cache[filter_key] = {
-                "total_hours": total_hours,
-                "url_durations": url_to_duration,
-            }
-            st.rerun()
 
 with col2:
     st.metric(
@@ -446,6 +419,40 @@ else:
             file_name="filtered_audio_data.csv",
             mime="text/csv",
         )
+
+# Show Calculate button ONLY after table is fully loaded and no cache exists
+if not durations_calculated and not filtered_df.empty:
+    with calculate_button_placeholder.container():
+        if st.button("📊 Calculate Session Time", key="calc_btn"):
+            # Calculate durations and cache
+            urls = filtered_df["audio_url"].tolist()
+            progress_bar = st.progress(0, text="Calculating durations...")
+
+            # Process in batches to update progress
+            batch_size = 50
+            all_durations = []
+            for i in range(0, len(urls), batch_size):
+                batch = urls[i : i + batch_size]
+                batch_durations = get_durations_parallel(batch, max_workers=20)
+                all_durations.extend(batch_durations)
+                progress = min((i + batch_size) / len(urls), 1.0)
+                progress_bar.progress(
+                    progress,
+                    text=f"Processing {min(i + batch_size, len(urls))}/{len(urls)} files...",
+                )
+
+            progress_bar.empty()
+
+            # Store in session state cache
+            url_to_duration = dict(zip(urls, all_durations))
+            total_duration_seconds = sum(all_durations)
+            calculated_hours = total_duration_seconds / 3600
+
+            st.session_state.duration_cache[filter_key] = {
+                "total_hours": calculated_hours,
+                "url_durations": url_to_duration,
+            }
+            st.rerun()
 
 # Footer
 st.markdown("---")
