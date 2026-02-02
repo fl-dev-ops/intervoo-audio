@@ -14,6 +14,7 @@ import os
 import subprocess
 import json
 import logging
+from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dotenv import load_dotenv
 
@@ -28,6 +29,29 @@ load_dotenv()
 DATABASE_URL = os.getenv(
     "DATABASE_URL", "postgresql://postgres:mypassword@localhost:4321/postgres"
 )
+
+# Persistent cache file for audio durations (shared across all users/sessions)
+CACHE_DIR = Path(__file__).parent / ".cache"
+DURATION_CACHE_FILE = CACHE_DIR / "audio_durations.json"
+
+
+def load_duration_cache() -> dict:
+    """Load duration cache from persistent file."""
+    if DURATION_CACHE_FILE.exists():
+        try:
+            with open(DURATION_CACHE_FILE, "r") as f:
+                return json.load(f)
+        except (json.JSONDecodeError, IOError):
+            return {}
+    return {}
+
+
+def save_duration_cache(cache: dict) -> None:
+    """Save duration cache to persistent file."""
+    CACHE_DIR.mkdir(exist_ok=True)
+    with open(DURATION_CACHE_FILE, "w") as f:
+        json.dump(cache, f)
+
 
 # Page config
 st.set_page_config(page_title="Audio Browser", page_icon="🎧", layout="wide")
@@ -257,52 +281,61 @@ st.markdown("---")
 total_recordings = len(filtered_df)
 unique_students = filtered_df["student_name"].nunique()
 
-# Duration calculation with ffprobe (cached per URL for 7 days)
-# Create a unique key for current filter combination
-filter_key = f"{selected_org}|{selected_student}|{selected_activity}|{selected_topic}"
+# Load persistent duration cache (shared across all users/sessions)
+duration_cache = load_duration_cache()
 
-# Initialize session state for cached durations per filter
-if "duration_cache" not in st.session_state:
-    st.session_state.duration_cache = {}
+# Check which URLs need duration calculation
+urls = filtered_df["audio_url"].tolist()
+uncached_urls = [url for url in urls if url not in duration_cache]
 
-# Check if we have cached results for this filter
-durations_calculated = False
-total_hours = 0.0
+# If we have uncached URLs, calculate them automatically
+if uncached_urls and not filtered_df.empty:
+    # Show progress while calculating
+    progress_placeholder = st.empty()
+    progress_bar = progress_placeholder.progress(0, text="Loading audio durations...")
 
-if filter_key in st.session_state.duration_cache:
-    # Use cached results
-    cache_entry = st.session_state.duration_cache[filter_key]
-    total_hours = cache_entry["total_hours"]
+    # Process uncached URLs in batches
+    batch_size = 50
+    for i in range(0, len(uncached_urls), batch_size):
+        batch = uncached_urls[i : i + batch_size]
+        batch_durations = get_durations_parallel(batch, max_workers=20)
 
-    # Restore duration columns to filtered_df
-    url_to_duration = cache_entry["url_durations"]
-    filtered_df = filtered_df.copy()
-    filtered_df["duration_seconds"] = filtered_df["audio_url"].map(
-        lambda x: url_to_duration.get(x, 0.0)
-    )
-    filtered_df["duration_formatted"] = filtered_df["duration_seconds"].apply(
-        lambda x: f"{int(x // 60)}m {int(x % 60):02d}s" if x > 0 else "—"
-    )
-    durations_calculated = True
+        # Update cache with new durations
+        for url, dur in zip(batch, batch_durations):
+            duration_cache[url] = dur
 
-# Placeholder for calculate button (will be populated after table loads)
-calculate_button_placeholder = st.empty()
+        # Update progress
+        progress = min((i + batch_size) / len(uncached_urls), 1.0)
+        progress_bar.progress(
+            progress,
+            text=f"Loading audio durations... {min(i + batch_size, len(uncached_urls))}/{len(uncached_urls)}",
+        )
+
+    # Save updated cache to file
+    save_duration_cache(duration_cache)
+    progress_placeholder.empty()
+
+# Now get durations for all URLs from cache
+filtered_df = filtered_df.copy()
+filtered_df["duration_seconds"] = filtered_df["audio_url"].map(
+    lambda x: duration_cache.get(x, 0.0)
+)
+filtered_df["duration_formatted"] = filtered_df["duration_seconds"].apply(
+    lambda x: f"{int(x // 60)}m {int(x % 60):02d}s" if x > 0 else "—"
+)
+
+# Calculate totals
+total_duration_seconds = filtered_df["duration_seconds"].sum()
+total_hours = total_duration_seconds / 3600
 
 col1, col2, col3 = st.columns(3)
 
 with col1:
-    if durations_calculated:
-        st.metric(
-            label="Total Session Time",
-            value=f"{total_hours:.1f} hrs",
-            help="Accurate duration from audio files",
-        )
-    else:
-        st.metric(
-            label="Total Session Time",
-            value="— hrs",
-            help="Calculating...",
-        )
+    st.metric(
+        label="Total Session Time",
+        value=f"{total_hours:.1f} hrs",
+        help="Accurate duration from audio files",
+    )
 
 with col2:
     st.metric(
@@ -332,6 +365,7 @@ else:
         "topic_name",
         "audio_url",
         "created_at",
+        "duration_formatted",
         "transcript",
     ]
     column_names = [
@@ -341,13 +375,9 @@ else:
         "Topic",
         "Audio URL",
         "Created At",
+        "Duration",
         "Transcript",
     ]
-
-    # Add duration column if calculated
-    if durations_calculated:
-        columns_to_display.insert(-1, "duration_formatted")
-        column_names.insert(-1, "Duration")
 
     display_df = filtered_df[columns_to_display].copy()
     display_df.columns = column_names
@@ -398,7 +428,7 @@ else:
         )
 
     with col2:
-        # Build export dataframe with duration if available
+        # Build export dataframe with duration
         export_columns = [
             "org_name",
             "student_name",
@@ -406,10 +436,9 @@ else:
             "topic_name",
             "audio_url",
             "created_at",
+            "duration_seconds",
+            "transcript",
         ]
-        if durations_calculated:
-            export_columns.append("duration_seconds")
-        export_columns.append("transcript")
 
         export_df = filtered_df[export_columns].copy()
         csv_data = export_df.to_csv(index=False)
@@ -420,43 +449,9 @@ else:
             mime="text/csv",
         )
 
-# Show Calculate button ONLY after table is fully loaded and no cache exists
-if not durations_calculated and not filtered_df.empty:
-    with calculate_button_placeholder.container():
-        if st.button("📊 Calculate Session Time", key="calc_btn"):
-            # Calculate durations and cache
-            urls = filtered_df["audio_url"].tolist()
-            progress_bar = st.progress(0, text="Calculating durations...")
-
-            # Process in batches to update progress
-            batch_size = 50
-            all_durations = []
-            for i in range(0, len(urls), batch_size):
-                batch = urls[i : i + batch_size]
-                batch_durations = get_durations_parallel(batch, max_workers=20)
-                all_durations.extend(batch_durations)
-                progress = min((i + batch_size) / len(urls), 1.0)
-                progress_bar.progress(
-                    progress,
-                    text=f"Processing {min(i + batch_size, len(urls))}/{len(urls)} files...",
-                )
-
-            progress_bar.empty()
-
-            # Store in session state cache
-            url_to_duration = dict(zip(urls, all_durations))
-            total_duration_seconds = sum(all_durations)
-            calculated_hours = total_duration_seconds / 3600
-
-            st.session_state.duration_cache[filter_key] = {
-                "total_hours": calculated_hours,
-                "url_durations": url_to_duration,
-            }
-            st.rerun()
-
 # Footer
 st.markdown("---")
 st.caption(
-    "Data is cached for 1 hour. Audio durations are calculated via ffprobe and cached for 7 days. "
+    "Data is cached for 1 hour. Audio durations are calculated automatically and cached persistently. "
     "Click 'Refresh Data' to fetch latest records."
 )
