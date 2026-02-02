@@ -326,14 +326,22 @@ filtered_df["duration_formatted"] = filtered_df["duration_seconds"].apply(
 
 # Calculate totals
 total_duration_seconds = filtered_df["duration_seconds"].sum()
-total_hours = total_duration_seconds / 3600
+
+# Format duration as human-readable (e.g., "419h 23m" or "42m")
+total_hours = int(total_duration_seconds // 3600)
+total_minutes = int((total_duration_seconds % 3600) // 60)
+
+if total_hours > 0:
+    duration_display = f"{total_hours}h {total_minutes}m"
+else:
+    duration_display = f"{total_minutes}m"
 
 col1, col2, col3 = st.columns(3)
 
 with col1:
     st.metric(
         label="Total Session Time",
-        value=f"{total_hours:.1f} hrs",
+        value=duration_display,
         help="Accurate duration from audio files",
     )
 
