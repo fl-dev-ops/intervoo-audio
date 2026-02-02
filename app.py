@@ -262,20 +262,29 @@ unique_students = filtered_df["student_name"].nunique()
 if "calculate_durations" not in st.session_state:
     st.session_state.calculate_durations = False
 
+# Calculate durations if requested (results are cached per URL for 7 days)
+durations_calculated = False
+if st.session_state.calculate_durations:
+    urls = filtered_df["audio_url"].tolist()
+    with st.spinner(""):  # Silent spinner
+        durations_sec = get_durations_parallel(urls, max_workers=50)
+        filtered_df = filtered_df.copy()
+        filtered_df["duration_seconds"] = durations_sec
+        filtered_df["duration_formatted"] = filtered_df["duration_seconds"].apply(
+            lambda x: f"{int(x // 60)}:{int(x % 60):02d}" if x > 0 else "—"
+        )
+        total_duration_seconds = sum(durations_sec)
+        total_hours = total_duration_seconds / 3600
+        durations_calculated = True
+
 col1, col2, col3 = st.columns(3)
 
 with col1:
-    if st.session_state.calculate_durations:
-        # Calculate real durations using ffprobe in parallel (cached per URL for 7 days)
-        urls = filtered_df["audio_url"].tolist()
-        with st.spinner(f"Probing {len(urls)} files in parallel (50 concurrent)..."):
-            durations_sec = get_durations_parallel(urls, max_workers=50)
-            total_duration_seconds = sum(durations_sec)
-            total_hours = total_duration_seconds / 3600
+    if durations_calculated:
         st.metric(
             label="Total Session Time",
             value=f"{total_hours:.1f} hrs",
-            help="Accurate duration calculated via ffprobe (cached 7 days)",
+            help="Accurate duration (cached 7 days)",
         )
     else:
         st.metric(
@@ -308,18 +317,16 @@ if filtered_df.empty:
     st.warning("No recordings match the selected filters.")
 else:
     # Create display dataframe with download links
-    display_df = filtered_df[
-        [
-            "org_name",
-            "student_name",
-            "activity_name",
-            "topic_name",
-            "audio_url",
-            "created_at",
-            "transcript",
-        ]
-    ].copy()
-    display_df.columns = [
+    columns_to_display = [
+        "org_name",
+        "student_name",
+        "activity_name",
+        "topic_name",
+        "audio_url",
+        "created_at",
+        "transcript",
+    ]
+    column_names = [
         "Organization",
         "Student",
         "Activity",
@@ -329,27 +336,38 @@ else:
         "Transcript",
     ]
 
+    # Add duration column if calculated
+    if durations_calculated:
+        columns_to_display.insert(-1, "duration_formatted")
+        column_names.insert(-1, "Duration")
+
+    display_df = filtered_df[columns_to_display].copy()
+    display_df.columns = column_names
+
     # Replace None/NaN transcripts with empty string for display
     display_df["Transcript"] = display_df["Transcript"].fillna(
         "No transcript available"
     )
 
+    # Column config for display
+    column_config = {
+        "Audio URL": st.column_config.LinkColumn(
+            "Audio URL", display_text="🔗 Download"
+        ),
+        "Created At": st.column_config.DatetimeColumn(
+            "Created At", format="YYYY-MM-DD HH:mm"
+        ),
+        "Transcript": st.column_config.TextColumn(
+            "Transcript",
+            width="large",
+            help="Full conversation transcript with speaker labels",
+        ),
+    }
+
     # Display as table with clickable links
     st.dataframe(
         display_df,
-        column_config={
-            "Audio URL": st.column_config.LinkColumn(
-                "Audio URL", display_text="🔗 Download"
-            ),
-            "Created At": st.column_config.DatetimeColumn(
-                "Created At", format="YYYY-MM-DD HH:mm"
-            ),
-            "Transcript": st.column_config.TextColumn(
-                "Transcript",
-                width="large",
-                help="Full conversation transcript with speaker labels",
-            ),
-        },
+        column_config=column_config,
         hide_index=True,
         width="stretch",
     )
@@ -372,8 +390,21 @@ else:
         )
 
     with col2:
-        # Export filtered data to CSV
-        csv_data = filtered_df.to_csv(index=False)
+        # Build export dataframe with duration if available
+        export_columns = [
+            "org_name",
+            "student_name",
+            "activity_name",
+            "topic_name",
+            "audio_url",
+            "created_at",
+        ]
+        if durations_calculated:
+            export_columns.append("duration_seconds")
+        export_columns.append("transcript")
+
+        export_df = filtered_df[export_columns].copy()
+        csv_data = export_df.to_csv(index=False)
         st.download_button(
             label="📊 Download CSV",
             data=csv_data,
