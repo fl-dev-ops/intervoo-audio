@@ -24,6 +24,56 @@ DATABASE_URL = os.getenv(
 st.set_page_config(page_title="Audio Browser", page_icon="🎧", layout="wide")
 
 
+def extract_transcript_from_segments(report_json):
+    """
+    Extract transcript text from ConversationFeedback.report JSON.
+
+    The report structure contains:
+    {
+        "transcript": {
+            "segments": [
+                {"speaker": "SPEAKER_00", "content": "Hello...", ...},
+                ...
+            ],
+            "speaker_map": [
+                {"speaker_id": "SPEAKER_00", "speaker_name": "Student"},
+                ...
+            ]
+        }
+    }
+    """
+    if not report_json:
+        return None
+
+    try:
+        transcript = report_json.get("transcript", {})
+        segments = transcript.get("segments", [])
+        speaker_map = transcript.get("speaker_map", [])
+
+        if not segments:
+            return None
+
+        # Build speaker ID to name mapping
+        speaker_names = {}
+        for mapping in speaker_map:
+            speaker_id = mapping.get("speaker_id", "")
+            speaker_name = mapping.get("speaker_name", "Unknown")
+            speaker_names[speaker_id] = speaker_name
+
+        # Concatenate segments with speaker labels
+        transcript_lines = []
+        for segment in segments:
+            speaker_id = segment.get("speaker", "")
+            content = segment.get("content", "").strip()
+            if content:
+                speaker_name = speaker_names.get(speaker_id, speaker_id)
+                transcript_lines.append(f"[{speaker_name}]: {content}")
+
+        return "\n".join(transcript_lines) if transcript_lines else None
+    except Exception:
+        return None
+
+
 @st.cache_data(ttl=60)  # Cache for 60 seconds
 def load_data_from_db():
     """Load audio data directly from database."""
@@ -37,13 +87,15 @@ def load_data_from_db():
         cr."audioFileUrl" AS audio_url,
         cr."createdAt" AS created_at,
         cr.status,
-        cr.duration
+        cr.duration,
+        cf.report AS feedback_report
     FROM conversation_recordings cr
     JOIN organizations o ON cr."organizationId" = o.id
     JOIN users u ON cr."studentId" = u.id
     JOIN activities a ON cr."activityId" = a.id
     LEFT JOIN topic_activities ta ON a.id = ta."activityId"
     LEFT JOIN topics t ON ta."topicId" = t.id
+    LEFT JOIN conversation_feedback cf ON cr.id = cf."conversationRecordingId"
     WHERE cr.status = 'READY'
     ORDER BY cr."createdAt" DESC;
     """
@@ -58,6 +110,12 @@ def load_data_from_db():
 
         if rows:
             df = pd.DataFrame([dict(row) for row in rows])
+            # Extract transcript from feedback_report JSON
+            df["transcript"] = df["feedback_report"].apply(
+                extract_transcript_from_segments
+            )
+            # Drop the raw JSON column
+            df = df.drop(columns=["feedback_report"])
             return df, None
         else:
             return pd.DataFrame(), None
@@ -178,6 +236,7 @@ else:
             "audio_url",
             "created_at",
             "duration",
+            "transcript",
         ]
     ].copy()
     display_df.columns = [
@@ -188,11 +247,17 @@ else:
         "Audio URL",
         "Created At",
         "Duration (ms)",
+        "Transcript",
     ]
 
     # Format duration
     if "Duration (ms)" in display_df.columns:
         display_df["Duration (ms)"] = display_df["Duration (ms)"].fillna(0).astype(int)
+
+    # Replace None/NaN transcripts with empty string for display
+    display_df["Transcript"] = display_df["Transcript"].fillna(
+        "No transcript available"
+    )
 
     # Display as table with clickable links
     st.dataframe(
@@ -203,6 +268,11 @@ else:
             ),
             "Created At": st.column_config.DatetimeColumn(
                 "Created At", format="YYYY-MM-DD HH:mm"
+            ),
+            "Transcript": st.column_config.TextColumn(
+                "Transcript",
+                width="large",
+                help="Full conversation transcript with speaker labels",
             ),
         },
         hide_index=True,
