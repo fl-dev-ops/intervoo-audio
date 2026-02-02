@@ -11,7 +11,16 @@ import pandas as pd
 import psycopg2
 from psycopg2.extras import RealDictCursor
 import os
+import subprocess
+import json
+import logging
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dotenv import load_dotenv
+
+# Suppress noisy thread warnings from Streamlit cache
+logging.getLogger("streamlit.runtime.scriptrunner_utils.script_run_context").setLevel(
+    logging.ERROR
+)
 
 # Load environment variables
 load_dotenv()
@@ -22,6 +31,63 @@ DATABASE_URL = os.getenv(
 
 # Page config
 st.set_page_config(page_title="Audio Browser", page_icon="🎧", layout="wide")
+
+
+@st.cache_data(ttl=86400 * 7)  # Cache for 7 days (durations don't change)
+def get_audio_duration(url: str) -> float | None:
+    """
+    Get audio duration in seconds using ffprobe.
+    Cached per URL for 7 days since audio files don't change.
+    """
+    if not url or "amazonaws.com" not in url:
+        return None
+
+    try:
+        result = subprocess.run(
+            ["ffprobe", "-v", "quiet", "-print_format", "json", "-show_format", url],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+
+        if result.returncode != 0:
+            return None
+
+        data = json.loads(result.stdout)
+        duration = data.get("format", {}).get("duration")
+
+        if duration:
+            return float(duration)
+        return None
+
+    except Exception:
+        return None
+
+
+def get_durations_parallel(urls: list[str], max_workers: int = 20) -> list[float]:
+    """
+    Get audio durations for multiple URLs in parallel.
+    Uses ThreadPoolExecutor for concurrent ffprobe calls.
+    """
+    results = [0.0] * len(urls)
+
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        # Submit all tasks
+        future_to_idx = {
+            executor.submit(get_audio_duration, url): idx
+            for idx, url in enumerate(urls)
+        }
+
+        # Collect results as they complete
+        for future in as_completed(future_to_idx):
+            idx = future_to_idx[future]
+            try:
+                duration = future.result()
+                results[idx] = duration or 0.0
+            except Exception:
+                results[idx] = 0.0
+
+    return results
 
 
 def extract_transcript_from_segments(report_json):
@@ -74,7 +140,7 @@ def extract_transcript_from_segments(report_json):
         return None
 
 
-@st.cache_data(ttl=60)  # Cache for 60 seconds
+@st.cache_data(ttl=3600)  # Cache for 1 hour
 def load_data_from_db():
     """Load audio data directly from database."""
 
@@ -188,23 +254,38 @@ st.sidebar.markdown(f"**Filtered Records:** {len(filtered_df)}")
 st.markdown("---")
 
 # Stats cards
-# Duration values are mixed: some in seconds (small values), some in milliseconds (large values)
-# Normalize all to seconds: if value > 1000, assume milliseconds and convert to seconds
-durations = filtered_df["duration"].fillna(0)
-normalized_seconds = durations.apply(lambda x: x / 1000 if x > 1000 else x)
-total_duration_seconds = normalized_seconds.sum()
-total_hours = total_duration_seconds / 3600  # Convert seconds to hours
 total_recordings = len(filtered_df)
 unique_students = filtered_df["student_name"].nunique()
+
+# Duration calculation with ffprobe (cached per URL)
+# Initialize session state for duration calculation
+if "calculate_durations" not in st.session_state:
+    st.session_state.calculate_durations = False
 
 col1, col2, col3 = st.columns(3)
 
 with col1:
-    st.metric(
-        label="Total Session Time",
-        value=f"{total_hours:.1f} hrs",
-        help="Total duration of all filtered recordings",
-    )
+    if st.session_state.calculate_durations:
+        # Calculate real durations using ffprobe in parallel (cached per URL for 7 days)
+        urls = filtered_df["audio_url"].tolist()
+        with st.spinner(f"Probing {len(urls)} files in parallel (50 concurrent)..."):
+            durations_sec = get_durations_parallel(urls, max_workers=50)
+            total_duration_seconds = sum(durations_sec)
+            total_hours = total_duration_seconds / 3600
+        st.metric(
+            label="Total Session Time",
+            value=f"{total_hours:.1f} hrs",
+            help="Accurate duration calculated via ffprobe (cached 7 days)",
+        )
+    else:
+        st.metric(
+            label="Total Session Time",
+            value="— hrs",
+            help="Click 'Calculate' to get accurate times",
+        )
+        if st.button("📊 Calculate", key="calc_btn"):
+            st.session_state.calculate_durations = True
+            st.rerun()
 
 with col2:
     st.metric(
@@ -235,7 +316,6 @@ else:
             "topic_name",
             "audio_url",
             "created_at",
-            "duration",
             "transcript",
         ]
     ].copy()
@@ -246,13 +326,8 @@ else:
         "Topic",
         "Audio URL",
         "Created At",
-        "Duration (ms)",
         "Transcript",
     ]
-
-    # Format duration
-    if "Duration (ms)" in display_df.columns:
-        display_df["Duration (ms)"] = display_df["Duration (ms)"].fillna(0).astype(int)
 
     # Replace None/NaN transcripts with empty string for display
     display_df["Transcript"] = display_df["Transcript"].fillna(
@@ -276,7 +351,7 @@ else:
             ),
         },
         hide_index=True,
-        use_container_width=True,
+        width="stretch",
     )
 
     # Bulk download section
@@ -309,5 +384,6 @@ else:
 # Footer
 st.markdown("---")
 st.caption(
-    "Data is cached for 60 seconds. Click 'Refresh Data' to fetch latest records."
+    "Data is cached for 1 hour. Audio durations are calculated via ffprobe and cached for 7 days. "
+    "Click 'Refresh Data' to fetch latest records."
 )
