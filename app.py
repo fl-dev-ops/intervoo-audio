@@ -269,6 +269,25 @@ selected_topic = st.sidebar.selectbox("Topic", topics)
 if selected_topic != "All":
     filtered_df = filtered_df[filtered_df["topic_name"] == selected_topic]
 
+# Date range filter
+min_date = df["created_at"].dt.date.min()
+max_date = df["created_at"].dt.date.max()
+
+date_range = st.sidebar.date_input(
+    "Date Range",
+    value=(min_date, max_date),
+    min_value=min_date,
+    max_value=max_date,
+)
+
+# Apply date range filter (only when both start and end are selected)
+if isinstance(date_range, (list, tuple)) and len(date_range) == 2:
+    start_date, end_date = date_range
+    filtered_df = filtered_df[
+        (filtered_df["created_at"].dt.date >= start_date)
+        & (filtered_df["created_at"].dt.date <= end_date)
+    ]
+
 # Display stats
 st.sidebar.markdown("---")
 st.sidebar.markdown(f"**Total Records:** {len(df)}")
